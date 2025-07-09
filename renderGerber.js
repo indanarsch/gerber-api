@@ -4,7 +4,7 @@ import path from 'path';
 import unzipper from 'unzipper';
 import pify from 'pify';
 import pcbStackup from 'pcb-stackup';
-import { detect } from 'whats-that-gerber';
+import detect from 'whats-that-gerber';
 
 /**
  * Renders top.svg and bottom.svg from uploaded Gerber ZIP
