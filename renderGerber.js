@@ -1,10 +1,24 @@
-// renderGerber.js
 import fs from 'fs-extra';
 import path from 'path';
 import unzipper from 'unzipper';
-import pify from 'pify';
 import pcbStackup from 'pcb-stackup';
 import detect from 'whats-that-gerber';
+
+/**
+ * Recursively get all files inside a directory
+ * @param {string} dir
+ * @returns {Promise<string[]>}
+ */
+async function getAllFiles(dir) {
+  const dirents = await fs.readdir(dir, { withFileTypes: true });
+  const files = await Promise.all(
+    dirents.map((dirent) => {
+      const res = path.resolve(dir, dirent.name);
+      return dirent.isDirectory() ? getAllFiles(res) : res;
+    })
+  );
+  return Array.prototype.concat(...files);
+}
 
 /**
  * Renders top.svg and bottom.svg from uploaded Gerber ZIP
@@ -16,7 +30,7 @@ export async function renderSVGsFromZip(zipPath, outputDir) {
   const extractPath = path.join(outputDir, 'unzipped');
   await fs.ensureDir(extractPath);
 
-  // Unzip the uploaded file
+  // ✅ Unzip the uploaded file
   await new Promise((resolve, reject) => {
     fs.createReadStream(zipPath)
       .pipe(unzipper.Extract({ path: extractPath }))
@@ -24,28 +38,31 @@ export async function renderSVGsFromZip(zipPath, outputDir) {
       .on('error', reject);
   });
 
-  const files = await fs.readdir(extractPath);
+  // ✅ Recursively get all files
+  const allFiles = await getAllFiles(extractPath);
   const layerInputs = [];
 
-  for (const file of files) {
-    const fullPath = path.join(extractPath, file);
-    const content = await fs.readFile(fullPath, 'utf8');
+  for (const filePath of allFiles) {
+    const stat = await fs.stat(filePath);
+    if (!stat.isFile()) continue;
 
-    const props = detect(file);
+    const content = await fs.readFile(filePath, 'utf8');
+    const filename = path.basename(filePath);
+    const props = detect(filename);
     if (!props) continue;
 
     layerInputs.push({
-      filename: file,
+      filename,
       side: props.side,
       type: props.type,
       gerber: content,
     });
   }
 
-  // Ensure we have at least top/bottom copper
+  // ✅ Ensure top and bottom copper layers exist
   const required = ['top.copper', 'bottom.copper'];
-  const found = layerInputs.map(l => `${l.side}.${l.type}`);
-  const missing = required.filter(r => !found.includes(r));
+  const found = layerInputs.map((l) => `${l.side}.${l.type}`);
+  const missing = required.filter((r) => !found.includes(r));
   if (missing.length) {
     throw new Error('Missing required layers: ' + missing.join(', '));
   }
@@ -58,5 +75,8 @@ export async function renderSVGsFromZip(zipPath, outputDir) {
   await fs.writeFile(topSVGPath, stackup.top.svg);
   await fs.writeFile(bottomSVGPath, stackup.bottom.svg);
 
-  return { topSVG: topSVGPath, bottomSVG: bottomSVGPath };
+  return {
+    topSVG: topSVGPath,
+    bottomSVG: bottomSVGPath
+  };
 }
