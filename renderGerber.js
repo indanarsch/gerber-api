@@ -1,3 +1,4 @@
+// renderGerber.js
 import fs from 'fs-extra';
 import path from 'path';
 import unzipper from 'unzipper';
@@ -5,19 +6,34 @@ import pcbStackup from 'pcb-stackup';
 import detect from 'whats-that-gerber';
 
 /**
- * Recursively get all files inside a directory
- * @param {string} dir
- * @returns {Promise<string[]>}
+ * Advanced layer detection supporting multiple EDA tools
+ * @param {string} filename
+ * @returns {null|{side: string, type: string}}
  */
-async function getAllFiles(dir) {
-  const dirents = await fs.readdir(dir, { withFileTypes: true });
-  const files = await Promise.all(
-    dirents.map((dirent) => {
-      const res = path.resolve(dir, dirent.name);
-      return dirent.isDirectory() ? getAllFiles(res) : res;
-    })
-  );
-  return Array.prototype.concat(...files);
+function detectLayer(filename) {
+  const name = filename.toLowerCase();
+  const base = path.basename(name);
+
+  const fallback = (side, type) => ({ side, type });
+
+  // Try built-in detection first
+  const result = detect(base);
+  if (result) return result;
+
+  if (base.match(/f\.cu|top|gtl|\.cmp|\.top$/)) return fallback('top', 'copper');
+  if (base.match(/b\.cu|bottom|gbl|\.sol|\.bot$/)) return fallback('bottom', 'copper');
+
+  if (base.match(/f\.mask|gts|stc|\.topmask/)) return fallback('top', 'soldermask');
+  if (base.match(/b\.mask|gbs|sts|\.bottommask/)) return fallback('bottom', 'soldermask');
+
+  if (base.match(/f\.silks|gto|plc|\.topsilk/)) return fallback('top', 'silkscreen');
+  if (base.match(/b\.silks|gbo|pls|\.bottomsilk/)) return fallback('bottom', 'silkscreen');
+
+  if (base.match(/edge\.cuts|outline|gm1|gko|.oln|.out/)) return fallback('all', 'outline');
+
+  if (base.match(/\.drl|\.drd|\.xln|\.cnc|\.txt|\.exc/)) return fallback('inner', 'drill');
+
+  return null;
 }
 
 /**
@@ -30,7 +46,7 @@ export async function renderSVGsFromZip(zipPath, outputDir) {
   const extractPath = path.join(outputDir, 'unzipped');
   await fs.ensureDir(extractPath);
 
-  // ✅ Unzip the uploaded file
+  // Unzip the archive
   await new Promise((resolve, reject) => {
     fs.createReadStream(zipPath)
       .pipe(unzipper.Extract({ path: extractPath }))
@@ -38,18 +54,33 @@ export async function renderSVGsFromZip(zipPath, outputDir) {
       .on('error', reject);
   });
 
-  // ✅ Recursively get all files
-  const allFiles = await getAllFiles(extractPath);
+  // Traverse all extracted files recursively
+  const walk = async (dir) => {
+    const files = await fs.readdir(dir);
+    const results = [];
+    for (const file of files) {
+      const fullPath = path.join(dir, file);
+      const stat = await fs.stat(fullPath);
+      if (stat.isDirectory()) {
+        results.push(...await walk(fullPath));
+      } else {
+        results.push(fullPath);
+      }
+    }
+    return results;
+  };
+
+  const allFiles = await walk(extractPath);
   const layerInputs = [];
 
   for (const filePath of allFiles) {
-    const stat = await fs.stat(filePath);
-    if (!stat.isFile()) continue;
-
     const content = await fs.readFile(filePath, 'utf8');
     const filename = path.basename(filePath);
-    const props = detect(filename);
-    if (!props) continue;
+    const props = detectLayer(filename);
+    if (!props) {
+      console.warn(`Skipped unrecognized layer: ${filename}`);
+      continue;
+    }
 
     layerInputs.push({
       filename,
@@ -59,10 +90,11 @@ export async function renderSVGsFromZip(zipPath, outputDir) {
     });
   }
 
-  // ✅ Ensure top and bottom copper layers exist
+  // Require at least top and bottom copper
   const required = ['top.copper', 'bottom.copper'];
-  const found = layerInputs.map((l) => `${l.side}.${l.type}`);
-  const missing = required.filter((r) => !found.includes(r));
+  const found = layerInputs.map(l => `${l.side}.${l.type}`);
+  const missing = required.filter(r => !found.includes(r));
+
   if (missing.length) {
     throw new Error('Missing required layers: ' + missing.join(', '));
   }
@@ -75,8 +107,5 @@ export async function renderSVGsFromZip(zipPath, outputDir) {
   await fs.writeFile(topSVGPath, stackup.top.svg);
   await fs.writeFile(bottomSVGPath, stackup.bottom.svg);
 
-  return {
-    topSVG: topSVGPath,
-    bottomSVG: bottomSVGPath
-  };
+  return { topSVG: topSVGPath, bottomSVG: bottomSVGPath };
 }
