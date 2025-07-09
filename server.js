@@ -1,67 +1,45 @@
 import express from 'express';
 import multer from 'multer';
+import cors from 'cors';
 import fs from 'fs-extra';
 import path from 'path';
-import archiver from 'archiver';
-import { fileURLToPath } from 'url';
+import JSZip from 'jszip';
 import { renderSVGsFromZip } from './renderGerber.js';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
-const port = process.env.PORT || 3000;
+const upload = multer({ dest: 'uploads/' });
+app.use(cors());
 
-// Create necessary folders
-const UPLOAD_DIR = path.join(__dirname, 'uploads');
-const OUTPUT_DIR = path.join(__dirname, 'output');
-fs.ensureDirSync(UPLOAD_DIR);
-fs.ensureDirSync(OUTPUT_DIR);
-
-// Setup multer for file upload
-const storage = multer.diskStorage({
-  destination: UPLOAD_DIR,
-  filename: (req, file, cb) => {
-    cb(null, Date.now() + '-' + file.originalname);
-  }
-});
-const upload = multer({ storage });
-
-// API: POST /api/render
-app.post('/api/render', upload.single('gerber'), async (req, res) => {
-  if (!req.file) {
-    return res.status(400).send('No file uploaded.');
-  }
-
-  const zipPath = req.file.path;
-  const sessionDir = path.join(OUTPUT_DIR, Date.now().toString());
-  await fs.ensureDir(sessionDir);
-
+app.post('/', upload.single('gerber'), async (req, res) => {
   try {
-    const { topSVG, bottomSVG } = await renderSVGsFromZip(zipPath, sessionDir);
+    const zipPath = req.file.path;
+    const outputDir = path.join('output', path.basename(zipPath));
+    await fs.ensureDir(outputDir);
 
-    // Create output.zip
-    const zipOutputPath = path.join(sessionDir, 'output.zip');
-    const archive = archiver('zip');
-    const output = fs.createWriteStream(zipOutputPath);
+    // ⬇️ Call your renderer
+    const { topSVG, bottomSVG } = await renderSVGsFromZip(zipPath, outputDir);
 
-    archive.pipe(output);
-    archive.file(topSVG, { name: 'top.svg' });
-    archive.file(bottomSVG, { name: 'bottom.svg' });
-    await archive.finalize();
+    // ⬇️ Load rendered SVGs
+    const top = await fs.readFile(topSVG);
+    const bottom = await fs.readFile(bottomSVG);
 
-    output.on('close', () => {
-      res.download(zipOutputPath, 'output.zip');
-    });
+    // ⬇️ Zip the results
+    const zip = new JSZip();
+    zip.file('top.svg', top);
+    zip.file('bottom.svg', bottom);
+    const zipBuffer = await zip.generateAsync({ type: 'nodebuffer' });
+
+    res.setHeader('Content-Type', 'application/zip');
+    res.send(zipBuffer);
+
+    // Optional cleanup
+    await fs.remove(zipPath);
+    await fs.remove(outputDir);
   } catch (err) {
-    console.error('Render error:', err);
-    res.status(500).send('Failed to generate Gerber preview.');
+    console.error('Render failed:', err);
+    res.status(500).send('Gerber render failed');
   }
 });
 
-// Health check
-app.get('/', (req, res) => {
-  res.send('Gerber render API is up');
-});
-
-app.listen(port, () => {
-  console.log(`✅ Server running on http://localhost:${port}`);
-});
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`✅ Gerber API listening on port ${PORT}`));
